@@ -74,12 +74,11 @@ static inline void rapid_scorer_avx2(RSModel *model, double **features_v, uint8_
             EqNode *eq = &model->eqnodes[eq_idx];
             uint32_t eta = 0;
             __m256d t_v = _mm256_set1_pd(eq->theta);
-            for (int i = 0; i < 8; i++) eta |= ((uint32_t)_mm256_movemask_pd(_mm256_cmp_pd(f_v[i], t_v, _CMP_GT_OQ)) << (i * 4));
+            for (int i = 0; i < 8; i++) eta |= ((uint32_t)_mm256_movemask_pd(_mm256_cmp_pd(f_v[i], t_v, _CMP_LE_OQ)) << (i * 4));
             
-            if (eta == 0) break;
+            if (eta == 0xFFFFFFFF) break;
 
-            __m256i v_eta = expand_bits_to_bytes_avx2(eta);
-            __m256i m_mid = _mm256_andnot_si256(v_eta, _mm256_set1_epi8(0xFF));
+            __m256i m_mid = expand_bits_to_bytes_avx2(eta);
 
             for (int q = 0; q < eq->u; q++) {
                 int t_id = eq->tree_ids[q]; Epitome *ep = &eq->epitomes[q];
@@ -134,23 +133,23 @@ static inline void rapid_scorer_avx512(RSModel *model, double **features_v, uint
             EqNode *eq = &model->eqnodes[eq_idx];
             uint64_t eta = 0;
             __m512d t_v = _mm512_set1_pd(eq->theta);
-            for (int i = 0; i < 8; i++) eta |= ((uint64_t)_mm512_cmp_pd_mask(f_v[i], t_v, _CMP_GT_OQ) << (i * 8));
+            for (int i = 0; i < 8; i++) eta |= ((uint64_t)_mm512_cmp_pd_mask(f_v[i], t_v, _CMP_LE_OQ) << (i * 8));
             
-            if (eta == 0) break;
-            __mmask64 k_eta = eta, k_not_eta = ~eta;
+            if (eta == 0xFFFFFFFFFFFFFFFFULL) break;
+            __mmask64 k_mid = eta, k_inv = ~eta;
             __m512i ff_v = _mm512_set1_epi8(0xFF);
             for (int q = 0; q < eq->u; q++) {
                 int t_id = eq->tree_ids[q]; Epitome *ep = &eq->epitomes[q];
                 int base = (t_id * m_bytes) * V_RS_512;
                 __m512i target_fbp = _mm512_loadu_si512((__m512i*)&leaf_indexes[base + ep->fbp * V_RS_512]);
-                _mm512_storeu_si512((__m512i*)&leaf_indexes[base + ep->fbp * V_RS_512], _mm512_and_si512(target_fbp, _mm512_mask_set1_epi8(ff_v, k_eta, ep->fb)));
+                _mm512_storeu_si512((__m512i*)&leaf_indexes[base + ep->fbp * V_RS_512], _mm512_and_si512(target_fbp, _mm512_mask_set1_epi8(ff_v, k_inv, ep->fb)));
                 if (ep->fbp != ep->ebp) {
                     for (int b = ep->fbp + 1; b < ep->ebp; b++) {
                         __m512i target_b = _mm512_loadu_si512((__m512i*)&leaf_indexes[base + b * V_RS_512]);
-                        _mm512_storeu_si512((__m512i*)&leaf_indexes[base + b * V_RS_512], _mm512_maskz_mov_epi8(k_not_eta, target_b));
+                        _mm512_storeu_si512((__m512i*)&leaf_indexes[base + b * V_RS_512], _mm512_maskz_mov_epi8(k_mid, target_b));
                     }
                     __m512i target_ebp = _mm512_loadu_si512((__m512i*)&leaf_indexes[base + ep->ebp * V_RS_512]);
-                    _mm512_storeu_si512((__m512i*)&leaf_indexes[base + ep->ebp * V_RS_512], _mm512_and_si512(target_ebp, _mm512_mask_set1_epi8(ff_v, k_eta, ep->eb)));
+                    _mm512_storeu_si512((__m512i*)&leaf_indexes[base + ep->ebp * V_RS_512], _mm512_and_si512(target_ebp, _mm512_mask_set1_epi8(ff_v, k_inv, ep->eb)));
                 }
             }
             eq_idx++;
