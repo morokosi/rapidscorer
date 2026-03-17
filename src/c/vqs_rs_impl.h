@@ -137,19 +137,18 @@ static inline void rapid_scorer_avx512(RSModel *model, double **features_v, uint
             
             if (eta == 0xFFFFFFFFFFFFFFFFULL) break;
             __mmask64 k_mid = eta, k_inv = ~eta;
-            __m512i ff_v = _mm512_set1_epi8(0xFF);
             for (int q = 0; q < eq->u; q++) {
                 int t_id = eq->tree_ids[q]; Epitome *ep = &eq->epitomes[q];
                 int base = (t_id * m_bytes) * V_RS_512;
                 __m512i target_fbp = _mm512_loadu_si512((__m512i*)&leaf_indexes[base + ep->fbp * V_RS_512]);
-                _mm512_storeu_si512((__m512i*)&leaf_indexes[base + ep->fbp * V_RS_512], _mm512_and_si512(target_fbp, _mm512_mask_set1_epi8(ff_v, k_inv, ep->fb)));
+                _mm512_storeu_si512((__m512i*)&leaf_indexes[base + ep->fbp * V_RS_512], _mm512_mask_and_epi32(target_fbp, k_inv, target_fbp, _mm512_set1_epi8(ep->fb)));
                 if (ep->fbp != ep->ebp) {
                     for (int b = ep->fbp + 1; b < ep->ebp; b++) {
                         __m512i target_b = _mm512_loadu_si512((__m512i*)&leaf_indexes[base + b * V_RS_512]);
                         _mm512_storeu_si512((__m512i*)&leaf_indexes[base + b * V_RS_512], _mm512_maskz_mov_epi8(k_mid, target_b));
                     }
                     __m512i target_ebp = _mm512_loadu_si512((__m512i*)&leaf_indexes[base + ep->ebp * V_RS_512]);
-                    _mm512_storeu_si512((__m512i*)&leaf_indexes[base + ep->ebp * V_RS_512], _mm512_and_si512(target_ebp, _mm512_mask_set1_epi8(ff_v, k_inv, ep->eb)));
+                    _mm512_storeu_si512((__m512i*)&leaf_indexes[base + ep->ebp * V_RS_512], _mm512_mask_and_epi32(target_ebp, k_inv, target_ebp, _mm512_set1_epi8(ep->eb)));
                 }
             }
             eq_idx++;
