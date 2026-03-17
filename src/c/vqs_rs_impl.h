@@ -80,14 +80,13 @@ static inline void rapid_scorer_avx2(RSModel *model, double **features_v, uint8_
 
             __m256i v_eta = expand_bits_to_bytes_avx2(eta);
             __m256i m_mid = _mm256_andnot_si256(v_eta, _mm256_set1_epi8(0xFF));
-            __m256i ff_v = _mm256_set1_epi8(0xFF);
 
             for (int q = 0; q < eq->u; q++) {
                 int t_id = eq->tree_ids[q]; Epitome *ep = &eq->epitomes[q];
                 int base = (t_id * m_bytes) * V_RS;
                 
                 __m256i target_fbp = _mm256_loadu_si256((__m256i*)&leaf_indexes[base + ep->fbp * V_RS]);
-                _mm256_storeu_si256((__m256i*)&leaf_indexes[base + ep->fbp * V_RS], _mm256_and_si256(target_fbp, _mm256_blendv_epi8(ff_v, _mm256_set1_epi8(ep->fb), v_eta)));
+                _mm256_storeu_si256((__m256i*)&leaf_indexes[base + ep->fbp * V_RS], _mm256_and_si256(target_fbp, _mm256_or_si256(m_mid, _mm256_set1_epi8(ep->fb))));
 
                 if (ep->fbp != ep->ebp) {
                     for (int b = ep->fbp + 1; b < ep->ebp; b++) {
@@ -95,7 +94,7 @@ static inline void rapid_scorer_avx2(RSModel *model, double **features_v, uint8_
                         _mm256_storeu_si256((__m256i*)&leaf_indexes[base + b * V_RS], _mm256_and_si256(target_b, m_mid));
                     }
                     __m256i target_ebp = _mm256_loadu_si256((__m256i*)&leaf_indexes[base + ep->ebp * V_RS]);
-                    _mm256_storeu_si256((__m256i*)&leaf_indexes[base + ep->ebp * V_RS], _mm256_and_si256(target_ebp, _mm256_blendv_epi8(ff_v, _mm256_set1_epi8(ep->eb), v_eta)));
+                    _mm256_storeu_si256((__m256i*)&leaf_indexes[base + ep->ebp * V_RS], _mm256_and_si256(target_ebp, _mm256_or_si256(m_mid, _mm256_set1_epi8(ep->eb))));
                 }
             }
             eq_idx++;
