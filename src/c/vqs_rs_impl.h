@@ -61,11 +61,9 @@ static inline void rapid_scorer_avx2(RSModel *model, double **features_v, uint8_
     memset(leaf_indexes, 0xFF, model->num_trees * m_bytes * V_RS);
     
     for (int k = 0; k < model->num_features; k++) {
-        int eq_idx = model->feature_offsets[k]; if (eq_idx == -1) continue;
-        int next_eq_idx = -1;
-        for (int next_k = k + 1; next_k <= model->num_features; next_k++) {
-            if (model->feature_offsets[next_k] != -1) { next_eq_idx = model->feature_offsets[next_k]; break; }
-        }
+        int eq_idx = model->feature_offsets[k];
+        int next_eq_idx = model->feature_offsets[k+1];
+        if (eq_idx == next_eq_idx) continue;
 
         __m256d f_v[8];
         for (int i = 0; i < 8; i++) f_v[i] = _mm256_set_pd(features_v[i*4+3][k], features_v[i*4+2][k], features_v[i*4+1][k], features_v[i*4+0][k]);
@@ -121,11 +119,10 @@ static inline void rapid_scorer_avx512(RSModel *model, double **features_v, uint
     int m_bytes = (model->max_leaves + 7) / 8;
     memset(leaf_indexes, 0xFF, model->num_trees * m_bytes * V_RS_512);
     for (int k = 0; k < model->num_features; k++) {
-        int eq_idx = model->feature_offsets[k]; if (eq_idx == -1) continue;
-        int next_eq_idx = -1;
-        for (int next_k = k + 1; next_k <= model->num_features; next_k++) {
-            if (model->feature_offsets[next_k] != -1) { next_eq_idx = model->feature_offsets[next_k]; break; }
-        }
+        int eq_idx = model->feature_offsets[k];
+        int next_eq_idx = model->feature_offsets[k+1];
+        if (eq_idx == next_eq_idx) continue;
+
         __m512d f_v[8];
         for (int i = 0; i < 8; i++) f_v[i] = _mm512_set_pd(features_v[i*8+7][k], features_v[i*8+6][k], features_v[i*8+5][k], features_v[i*8+4][k], features_v[i*8+3][k], features_v[i*8+2][k], features_v[i*8+1][k], features_v[i*8+0][k]);
         

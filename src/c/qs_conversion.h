@@ -143,13 +143,18 @@ static RSModel* convert_to_rs(Model *model) {
     qsort(raw, total_int, sizeof(RawRSNode), compare_rs_raw);
     rs->eqnodes = malloc(sizeof(EqNode) * total_int);
     rs->feature_offsets = malloc(sizeof(int) * (rs->num_features + 1));
-    memset(rs->feature_offsets, -1, sizeof(int) * (rs->num_features + 1));
     int num_u = 0;
+    int curr_feat = 0;
     for (int i = 0; i < total_int; ) {
-        int s = i; while (i < total_int && raw[i].feature_idx == raw[s].feature_idx && raw[i].theta == raw[s].theta) i++;
+        int s = i; 
+        int feat_idx = raw[s].feature_idx;
+        while (curr_feat <= feat_idx) {
+            rs->feature_offsets[curr_feat++] = num_u;
+        }
+
+        while (i < total_int && raw[i].feature_idx == feat_idx && raw[i].theta == raw[s].theta) i++;
         int u = i - s; EqNode *eq = &rs->eqnodes[num_u]; eq->theta = raw[s].theta; eq->u = u;
         eq->tree_ids = malloc(sizeof(int) * u); eq->epitomes = malloc(sizeof(Epitome) * u);
-        if (rs->feature_offsets[raw[s].feature_idx] == -1) rs->feature_offsets[raw[s].feature_idx] = num_u;
         for (int j = 0; j < u; j++) {
             RawRSNode *rn = &raw[s+j]; eq->tree_ids[j] = rn->tree_id;
             uint8_t *mask = malloc(m_bytes); memset(mask, 0xFF, m_bytes);
@@ -162,7 +167,9 @@ static RSModel* convert_to_rs(Model *model) {
         }
         num_u++;
     }
-    rs->feature_offsets[rs->num_features] = num_u;
+    while (curr_feat <= rs->num_features) {
+        rs->feature_offsets[curr_feat++] = num_u;
+    }
     rs->num_eqnodes = num_u; free(raw); return rs;
 }
 
