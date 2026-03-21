@@ -144,18 +144,17 @@ static RSModel* convert_to_rs(Model *model) {
     rs->eqnodes = malloc(sizeof(EqNode) * total_int);
     rs->feature_offsets = malloc(sizeof(int) * (rs->num_features + 1));
     int num_u = 0;
-    int curr_feat = 0;
+    int *feat_counts = calloc(rs->num_features, sizeof(int));
+    
+    // First pass: Create EqNodes and count them per feature
     for (int i = 0; i < total_int; ) {
         int s = i; 
         int feat_idx = raw[s].feature_idx;
-        while (curr_feat <= feat_idx) {
-            rs->feature_offsets[curr_feat++] = num_u;
-        }
-
         while (i < total_int && raw[i].feature_idx == feat_idx && raw[i].theta == raw[s].theta) i++;
-        int u = i - s; EqNode *eq = &rs->eqnodes[num_u]; eq->theta = raw[s].theta; eq->u = u;
-        eq->tree_ids = malloc(sizeof(int) * u); eq->epitomes = malloc(sizeof(Epitome) * u);
-        for (int j = 0; j < u; j++) {
+        
+        EqNode *eq = &rs->eqnodes[num_u]; eq->theta = raw[s].theta; eq->u = i - s;
+        eq->tree_ids = malloc(sizeof(int) * eq->u); eq->epitomes = malloc(sizeof(Epitome) * eq->u);
+        for (int j = 0; j < eq->u; j++) {
             RawRSNode *rn = &raw[s+j]; eq->tree_ids[j] = rn->tree_id;
             uint8_t *mask = malloc(m_bytes); memset(mask, 0xFF, m_bytes);
             int leaf_ptr = 0;
@@ -165,11 +164,19 @@ static RSModel* convert_to_rs(Model *model) {
             else { eq->epitomes[j].fb = mask[fbp]; eq->epitomes[j].eb = mask[ebp]; eq->epitomes[j].fbp = fbp; eq->epitomes[j].ebp = ebp; }
             free(mask);
         }
+        feat_counts[feat_idx]++;
         num_u++;
     }
-    while (curr_feat <= rs->num_features) {
-        rs->feature_offsets[curr_feat++] = num_u;
+
+    // Second pass: Build CSR offsets from counts
+    int offset = 0;
+    for (int k = 0; k < rs->num_features; k++) {
+        rs->feature_offsets[k] = offset;
+        offset += feat_counts[k];
     }
+    rs->feature_offsets[rs->num_features] = offset;
+    
+    free(feat_counts);
     rs->num_eqnodes = num_u; free(raw); return rs;
 }
 

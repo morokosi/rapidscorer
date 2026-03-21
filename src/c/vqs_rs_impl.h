@@ -59,6 +59,7 @@ static inline __m256i expand_bits_to_bytes_avx2(uint32_t m) {
 static inline void rapid_scorer_avx2(RSModel *model, double **features_v, uint8_t *leaf_indexes, double *scores_v) {
     int m_bytes = (model->max_leaves + 7) / 8;
     memset(leaf_indexes, 0xFF, model->num_trees * m_bytes * V_RS);
+    memset(scores_v, 0, sizeof(double) * V_RS);
     
     for (int k = 0; k < model->num_features; k++) {
         int eq_idx = model->feature_offsets[k];
@@ -98,6 +99,7 @@ static inline void rapid_scorer_avx2(RSModel *model, double **features_v, uint8_
         }
     }
     
+    /*
     memset(scores_v, 0, sizeof(double) * V_RS);
     for (int t = 0; t < model->num_trees; t++) {
         uint8_t *base = &leaf_indexes[t * m_bytes * V_RS];
@@ -111,6 +113,88 @@ static inline void rapid_scorer_avx2(RSModel *model, double **features_v, uint8_
             fin |= mask; if (fin == 0xFFFFFFFFU) break;
         }
         for (int s = 0; s < V_RS; s++) if (b_arr[s] != 0) scores_v[s] += model->leaf_values[t][i_arr[s] * 8 + __builtin_ctz(b_arr[s])];
+    }
+        */
+       // ツリーのループ内（memset等の初期化は不要になります）
+    for (int t = 0; t < model->num_trees; t++) {
+        uint8_t *base = &leaf_indexes[t * m_bytes * V_RS];
+        
+        __m256i v_fin = _mm256_setzero_si256();
+        __m256i v_first_byte_val = _mm256_setzero_si256();
+        __m256i v_first_byte_idx = _mm256_setzero_si256();
+
+        // -------------------------------------------------------------
+        // Step 3.a: 左端のTRUEバイト (\vec{b}) と、そのチャンクインデックス (\vec{c_1}) を探す 
+        // -------------------------------------------------------------
+        for (int b = 0; b < m_bytes; b++) {
+            __m256i v_curr_bytes = _mm256_loadu_si256((__m256i*)&base[b * V_RS]);
+            
+            // 非ゼロのバイトを 0xFF、ゼロを 0x00 のマスクに変換
+            __m256i v_is_nonzero = ~_mm256_cmpeq_epi8(v_curr_bytes, _mm256_setzero_si256());
+            
+            // まだリーフが見つかっていない（~v_fin）かつ、今回非ゼロだったデータを抽出
+            __m256i v_new_found = _mm256_andnot_si256(v_fin, v_is_nonzero);
+            
+            // \vec{b} と \vec{c_1} を更新
+            v_first_byte_val = _mm256_blendv_epi8(v_first_byte_val, v_curr_bytes, v_new_found);
+            v_first_byte_idx = _mm256_blendv_epi8(v_first_byte_idx, _mm256_set1_epi8(b), v_new_found);
+            
+            v_fin = _mm256_or_si256(v_fin, v_new_found);
+            
+            // 全てのサンプルが到達リーフを見つけたら早期退出
+            if ((uint32_t)_mm256_movemask_epi8(v_fin) == 0xFFFFFFFFU) break;
+        }
+
+        // -------------------------------------------------------------
+        // Step 3.b: 各バイト内の最も右にある1のビット位置 (\vec{c_2}) を計算 
+        // -------------------------------------------------------------
+        // AVX2の pshufb を使ったテーブル引きによる 8-bit CTZ (Count Trailing Zeros) のベクトル計算
+        __m256i v_ctz_lut = _mm256_setr_epi8(
+            4, 0, 1, 0, 2, 0, 1, 0, 3, 0, 1, 0, 2, 0, 1, 0,
+            4, 0, 1, 0, 2, 0, 1, 0, 3, 0, 1, 0, 2, 0, 1, 0
+        );
+        __m256i v_lo_nibble = _mm256_and_si256(v_first_byte_val, _mm256_set1_epi8(0x0F));
+        // 8ビット右シフト命令がないため、16ビットシフトしてマスクするハック
+        __m256i v_hi_nibble = _mm256_and_si256(_mm256_srli_epi16(v_first_byte_val, 4), _mm256_set1_epi8(0x0F));
+        
+        __m256i v_ctz_lo = _mm256_shuffle_epi8(v_ctz_lut, v_lo_nibble);
+        __m256i v_ctz_hi = _mm256_shuffle_epi8(v_ctz_lut, v_hi_nibble);
+        
+        __m256i v_is_lo_zero = _mm256_cmpeq_epi8(v_lo_nibble, _mm256_setzero_si256());
+        
+        // 下位4ビットがゼロなら「上位のCTZ + 4」、そうでなければ「下位のCTZ」を \vec{c_2} とする
+        __m256i v_c2 = _mm256_blendv_epi8(v_ctz_lo, _mm256_add_epi8(v_ctz_hi, _mm256_set1_epi8(4)), v_is_lo_zero);
+
+        // -------------------------------------------------------------
+        // Step 3.c: 最終インデックスの算出 (\vec{c} = \vec{c_1} * 8 + \vec{c_2}) とスコアの一括ロード [cite: 27, 370, 400]
+        // -------------------------------------------------------------
+        uint8_t c1_arr[32] __attribute__((aligned(32)));
+        uint8_t c2_arr[32] __attribute__((aligned(32)));
+        _mm256_store_si256((__m256i*)c1_arr, v_first_byte_idx);
+        _mm256_store_si256((__m256i*)c2_arr, v_c2);
+        
+        double* cur_leaf_values = model->leaf_values[t];
+
+        // _mm256_i32gather_pd は1度に4つのdouble要素を取るため、32サンプルを8周で処理する
+        for (int i = 0; i < V_RS; i += 4) {
+            // 8-bitのインデックス4つを読み込み、32-bit整数に拡張 (Zero-Extend)
+            __m128i v_c1_4 = _mm_cvtsi32_si128(*(int*)&c1_arr[i]);
+            __m128i v_c2_4 = _mm_cvtsi32_si128(*(int*)&c2_arr[i]);
+            
+            __m128i v_c1_32 = _mm_cvtepu8_epi32(v_c1_4);
+            __m128i v_c2_32 = _mm_cvtepu8_epi32(v_c2_4);
+            
+            // インデックスの算出: \vec{c} = \vec{c_1} * 8 + \vec{c_2} 
+            // (左シフト3で8倍を表現)
+            __m128i v_idx = _mm_add_epi32(_mm_slli_epi32(v_c1_32, 3), v_c2_32);
+            
+            // Gather命令で4つのスコアを同時に取得し、現在のスコアに加算 
+            __m256d v_scores = _mm256_i32gather_pd(cur_leaf_values, v_idx, 8); // scale=8(doubleのサイズ)
+            
+            __m256d v_curr_scores = _mm256_load_pd(&scores_v[i]);
+            v_curr_scores = _mm256_add_pd(v_curr_scores, v_scores);
+            _mm256_store_pd(&scores_v[i], v_curr_scores);
+        }
     }
 }
 
@@ -154,16 +238,49 @@ static inline void rapid_scorer_avx512(RSModel *model, double **features_v, uint
     memset(scores_v, 0, sizeof(double) * V_RS_512);
     for (int t = 0; t < model->num_trees; t++) {
         uint8_t *base = &leaf_indexes[t * m_bytes * V_RS_512];
-        uint8_t b_arr[V_RS_512]; int i_arr[V_RS_512];
-        memset(b_arr, 0, V_RS_512); memset(i_arr, 0, sizeof(int) * V_RS_512);
-        uint64_t fin = 0;
+        
+        uint64_t k_fin = 0;
+        __m512i v_first_byte_val = _mm512_setzero_si512();
+        __m512i v_first_byte_idx = _mm512_setzero_si512();
+
         for (int b = 0; b < m_bytes; b++) {
-            uint64_t mask = _mm512_cmpneq_epi8_mask(_mm512_loadu_si512((__m512i*)&base[b * V_RS_512]), _mm512_setzero_si512());
-            uint64_t newly = mask & ~fin;
-            while (newly > 0) { int s = __builtin_ctzll(newly); b_arr[s] = base[b * V_RS_512 + s]; i_arr[s] = b; newly &= ~(1ULL << s); }
-            fin |= mask; if (fin == 0xFFFFFFFFFFFFFFFFULL) break;
+            __m512i v_curr_bytes = _mm512_loadu_si512((__m512i*)&base[b * V_RS_512]);
+            uint64_t k_nonzero = _mm512_cmpneq_epi8_mask(v_curr_bytes, _mm512_setzero_si512());
+            uint64_t k_new_found = k_nonzero & ~k_fin;
+            
+            v_first_byte_val = _mm512_mask_blend_epi8(k_new_found, v_first_byte_val, v_curr_bytes);
+            v_first_byte_idx = _mm512_mask_blend_epi8(k_new_found, v_first_byte_idx, _mm512_set1_epi8(b));
+            
+            k_fin |= k_new_found;
+            if (k_fin == 0xFFFFFFFFFFFFFFFFULL) break;
         }
-        for (int s = 0; s < V_RS_512; s++) if (b_arr[s] != 0) scores_v[s] += model->leaf_values[t][i_arr[s] * 8 + __builtin_ctz(b_arr[s])];
+
+        __m512i v_ctz_lut = _mm512_set_epi8(
+            0, 1, 0, 2, 0, 1, 0, 3, 0, 1, 0, 2, 0, 1, 0, 4,
+            0, 1, 0, 2, 0, 1, 0, 3, 0, 1, 0, 2, 0, 1, 0, 4,
+            0, 1, 0, 2, 0, 1, 0, 3, 0, 1, 0, 2, 0, 1, 0, 4,
+            0, 1, 0, 2, 0, 1, 0, 3, 0, 1, 0, 2, 0, 1, 0, 4
+        );
+        __m512i v_lo_nibble = _mm512_and_si512(v_first_byte_val, _mm512_set1_epi8(0x0F));
+        __m512i v_hi_nibble = _mm512_and_si512(_mm512_srli_epi16(v_first_byte_val, 4), _mm512_set1_epi8(0x0F));
+        __m512i v_ctz_lo = _mm512_shuffle_epi8(v_ctz_lut, v_lo_nibble);
+        __m512i v_ctz_hi = _mm512_shuffle_epi8(v_ctz_lut, v_hi_nibble);
+        uint64_t k_lo_zero = _mm512_cmpeq_epi8_mask(v_lo_nibble, _mm512_setzero_si512());
+        __m512i v_c2 = _mm512_mask_blend_epi8(k_lo_zero, v_ctz_lo, _mm512_add_epi8(v_ctz_hi, _mm512_set1_epi8(4)));
+
+        uint8_t c1_arr[64] __attribute__((aligned(64)));
+        uint8_t c2_arr[64] __attribute__((aligned(64)));
+        _mm512_store_si512((__m512i*)c1_arr, v_first_byte_idx);
+        _mm512_store_si512((__m512i*)c2_arr, v_c2);
+        
+        double* cur_leaf_values = model->leaf_values[t];
+        for (int i = 0; i < V_RS_512; i += 8) {
+            __m256i v_idx = _mm256_add_epi32(_mm256_slli_epi32(_mm256_cvtepu8_epi32(_mm_loadl_epi64((__m128i*)&c1_arr[i])), 3), _mm256_cvtepu8_epi32(_mm_loadl_epi64((__m128i*)&c2_arr[i])));
+            __m512d v_scores = _mm512_i32gather_pd(v_idx, cur_leaf_values, 8);
+            __m512d v_curr_scores = _mm512_loadu_pd(&scores_v[i]);
+            v_curr_scores = _mm512_add_pd(v_curr_scores, v_scores);
+            _mm512_storeu_pd(&scores_v[i], v_curr_scores);
+        }
     }
 }
 #endif
